@@ -1,0 +1,385 @@
+# =============================================================================
+# Script para el análisis proteómico diferencial en cáncer de mama metastásico
+# Trabajo Fin de Máster - Máster en Bioinformática - VIU
+#
+# Título: Análisis proteómico diferencial para el estudio del papel de los
+#         glóbulos rojos en el microambiente tumoral en cáncer de mama metastásico
+#
+# Autor: Lucía Pedrouzo Alarcón
+# Fecha: 2025-07-11
+# =============================================================================
+
+# ==========================
+# 1. Carga de librerías
+# ==========================
+if (!require("readxl")) install.packages("readxl")
+if (!require("openxlsx")) install.packages("openxlsx")
+if (!require("ggrepel")) install.packages("ggrepel")
+if (!require("tidyverse")) install.packages("tidyverse")
+
+library(readxl)
+library(openxlsx)
+library(ggrepel)
+library(tidyverse)
+
+# ==============================
+# 2. Cargar datos desde Excel
+# ==============================
+file <- "C:/Users/lucia/OneDrive/Escritorio/MÁSTER BIOINFORMÁTICA VIU/TFM/data1.xlsx"
+raw_data <- read_excel(file, skip = 2, col_names = FALSE)
+metadata <- read_excel(file, range = "A1:Y2", col_names = FALSE)
+
+sample_names <- as.character(metadata[1, -1])
+group_labels <- as.character(metadata[2, -1])
+
+colnames(raw_data) <- c("Protein", sample_names)
+raw_data <- as.data.frame(raw_data)
+rownames(raw_data) <- raw_data[[1]]
+raw_data <- raw_data[, -1]
+
+# ==============================
+# 3. Normalización (log2)
+# ==============================
+expr_matrix <- as.matrix(raw_data) %>% apply(2, as.numeric)
+rownames(expr_matrix) <- rownames(raw_data)
+log_expr_matrix <- log2(expr_matrix + 1)
+
+# ====================================
+# 4. Visualización de medias: boxplot
+# ====================================
+log_expr_df <- as.data.frame(log_expr_matrix)
+log_expr_df$Protein <- rownames(log_expr_df)
+
+log_expr_long <- pivot_longer(
+  log_expr_df,
+  cols = -Protein,
+  names_to = "Muestra",
+  values_to = "Log2Intensidad"
+)
+
+grupo_df <- data.frame(Muestra = sample_names, Grupo = group_labels)
+log_expr_long <- left_join(log_expr_long, grupo_df, by = "Muestra")
+
+ggplot(log_expr_long, aes(x = Muestra, y = Log2Intensidad, fill = Grupo)) +
+  geom_boxplot(outlier.size = 0.5) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  labs(title = "Distribución de intensidades log2 por muestra")
+
+# ==============================
+# 5. Definición de contrastes
+# ==============================
+group_labels_CN <- ifelse(group_labels == "CN", "CN", "Others")
+group_labels_CT <- ifelse(group_labels == "CT", "CT", "Cancer")
+m_indices <- which(group_labels %in% c("M0", "M1"))
+expr_sub_M <- log_expr_matrix[, m_indices]
+group_sub_M <- ifelse(group_labels[m_indices] == "M0", "M0", "M1")
+
+# ====================================
+# 6. Test de normalidad (Shapiro-Wilk)
+# ====================================
+test_normalidad <- function(expr, grupos, grupo1, grupo2, nombre_contraste) {
+  idx1 <- which(grupos == grupo1)
+  idx2 <- which(grupos == grupo2)
+  
+  resultados <- lapply(1:nrow(expr), function(i) {
+    x1 <- expr[i, idx1]
+    x2 <- expr[i, idx2]
+    
+    pval1 <- if (length(na.omit(x1)) >= 3) tryCatch(shapiro.test(x1)$p.value, error = function(e) NA) else NA
+    pval2 <- if (length(na.omit(x2)) >= 3) tryCatch(shapiro.test(x2)$p.value, error = function(e) NA) else NA
+    
+    data.frame(
+      Protein = rownames(expr)[i],
+      p_normal_g1 = pval1,
+      p_normal_g2 = pval2
+    )
+  })
+  
+  resultados_df <- bind_rows(resultados)
+  
+  resultados_df$non_normal <- with(resultados_df,
+                                   !is.na(p_normal_g1) & p_normal_g1 < 0.05 |
+                                     !is.na(p_normal_g2) & p_normal_g2 < 0.05)
+  
+  cat("\n--- Contraste:", nombre_contraste, "---\n")
+  cat("Total proteínas:", nrow(resultados_df), "\n")
+  cat("Distribución no normal en al menos un grupo:", sum(resultados_df$non_normal), "\n")
+  
+  write.csv(resultados_df, paste0(nombre_contraste, "_normality.csv"), row.names = FALSE)
+  return(resultados_df)
+}
+
+# Ejecutar Shapiro-Wilk
+normalidad_CN <- test_normalidad(log_expr_matrix, group_labels_CN, "CN", "Others", "CN_vs_Others")
+normalidad_CT <- test_normalidad(log_expr_matrix, group_labels_CT, "CT", "Cancer", "CT_vs_Cancer")
+normalidad_M  <- test_normalidad(expr_sub_M, group_sub_M, "M0", "M1", "M0_vs_M1")
+
+# =====================================
+# 7. Análisis diferencial (Wilcoxon)
+# =====================================
+library(openxlsx)
+
+exportar_significativas_excel <- function(resultados_df, nombre_contraste) {
+  significativas <- resultados_df %>%
+    filter(!is.na(pvalue), pvalue < 0.05, abs(log2FC) > 0.58)
+  write.xlsx(significativas, paste0("proteinas_significativas_", nombre_contraste, ".xlsx"), rowNames = FALSE)
+}
+
+analisis_wilcoxon <- function(expr, grupos, grupo1, grupo2, nombre_contraste) {
+  idx1 <- which(grupos == grupo1)
+  idx2 <- which(grupos == grupo2)
+  
+  resultados <- lapply(1:nrow(expr), function(i) {
+    x1 <- expr[i, idx1]
+    x2 <- expr[i, idx2]
+    
+    pval <- NA
+    if (length(na.omit(x1)) >= 3 && length(na.omit(x2)) >= 3) {
+      pval <- tryCatch(wilcox.test(x1, x2)$p.value, error = function(e) NA)
+    }
+    
+    log2FC <- mean(x1, na.rm = TRUE) - mean(x2, na.rm = TRUE)
+    
+    data.frame(
+      Protein = rownames(expr)[i],
+      log2FC = log2FC,
+      pvalue = pval
+    )
+  })
+  
+  resultados_df <- bind_rows(resultados)
+  resultados_df$adj_pvalue <- p.adjust(resultados_df$pvalue, method = "BH")
+  resultados_df <- arrange(resultados_df, pvalue)
+  
+  write.csv(resultados_df, paste0(nombre_contraste, "_wilcoxon_test.csv"), row.names = FALSE)
+  exportar_significativas_excel(resultados_df, nombre_contraste)
+  cat("Guardado:", paste0(nombre_contraste, "_wilcoxon_test.csv"), "y Excel de significativas\n")
+  return(resultados_df)
+}
+
+res_CN <- analisis_wilcoxon(log_expr_matrix, group_labels_CN, "CN", "Others", "CN_vs_Others")
+res_CT <- analisis_wilcoxon(log_expr_matrix, group_labels_CT, "CT", "Cancer", "CT_vs_Cancer")
+res_M  <- analisis_wilcoxon(expr_sub_M, group_sub_M, "M0", "M1", "M0_vs_M1")
+
+# Comparaciones adicionales
+ct_m0_idx <- which(group_labels %in% c("CT", "M0"))
+expr_ct_m0 <- log_expr_matrix[, ct_m0_idx]
+group_ct_m0 <- group_labels[ct_m0_idx]
+res_CT_vs_M0 <- analisis_wilcoxon(expr_ct_m0, group_ct_m0, "CT", "M0", "CT_vs_M0")
+
+ct_m1_idx <- which(group_labels %in% c("CT", "M1"))
+expr_ct_m1 <- log_expr_matrix[, ct_m1_idx]
+group_ct_m1 <- group_labels[ct_m1_idx]
+res_CT_vs_M1 <- analisis_wilcoxon(expr_ct_m1, group_ct_m1, "CT", "M1", "CT_vs_M1")
+
+# ===================
+# 8. Volcano plots
+# ===================
+library(ggplot2)
+library(ggrepel)
+library(readr)
+library(dplyr)
+
+archivos <- list(
+  CN_vs_Others = "CN_vs_Others_wilcoxon_test.csv",
+  CT_vs_Cancer = "CT_vs_Cancer_wilcoxon_test.csv",
+  M0_vs_M1     = "M0_vs_M1_wilcoxon_test.csv",
+  CT_vs_M0     = "CT_vs_M0_wilcoxon_test.csv",
+  CT_vs_M1     = "CT_vs_M1_wilcoxon_test.csv"
+)
+
+for (nombre in names(archivos)) {
+  archivo <- archivos[[nombre]]
+  if (file.exists(archivo)) {
+    datos <- read_csv(archivo)
+    
+    datos <- datos %>%
+      mutate(
+        Abreviado = gsub(".*GN=([^ ]+).*", "\\1", Protein),
+        neg_log10_p = -log10(pvalue),
+        Significance = case_when(
+          pvalue < 0.05 & log2FC > 0.58  ~ "Up",
+          pvalue < 0.05 & log2FC < -0.58 ~ "Down",
+          TRUE                           ~ "Not significant"
+        )
+      )
+    
+    top_sig <- datos %>% filter(Significance != "Not significant") %>% arrange(pvalue) %>% slice_head(n = 10)
+    
+    p <- ggplot(datos, aes(x = log2FC, y = neg_log10_p, color = Significance)) +
+      geom_jitter(width = 0.1, height = 0.05, size = 1.5, alpha = 0.6) +
+      geom_text_repel(data = top_sig, aes(label = Abreviado),
+                      size = 3, max.overlaps = Inf, box.padding = 0.5, segment.size = 0.2) +
+      geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+      geom_vline(xintercept = c(-0.58, 0.58), linetype = "dashed", color = "black") +
+      scale_color_manual(values = c("Up" = "red", "Down" = "blue", "Not significant" = "black")) +
+      theme_minimal() +
+      labs(title = paste("Volcano plot:", nombre),
+           x = "log2 Fold Change", y = "-log10(p-value)")
+    
+    ggsave(paste0("volcano_", nombre, ".pdf"), plot = p, width = 7, height = 5)
+    print(paste("Guardado:", paste0("volcano_", nombre, ".pdf")))
+  }
+}
+
+# ============================
+# 9. Análisis GO con topGO 
+# ============================
+
+# 1. Instalar y cargar librerías necesarias
+if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install(c("topGO", "org.Hs.eg.db", "AnnotationDbi"), ask = FALSE)
+install.packages(c("ggplot2", "openxlsx", "dplyr"))
+
+library(topGO)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(ggplot2)
+library(openxlsx)
+library(dplyr)
+
+# 2. Lista completa de genes desde log_expr_matrix (ya cargado en entorno)
+all_genes <- rownames(log_expr_matrix)
+all_symbols <- gsub(".*GN=([^ ]+).*", "\\1", all_genes)
+
+# 3. Función para análisis GO y gráfico combinado
+run_topGO_combined_plot <- function(archivo_excel, nombre_contraste) {
+  cat("\nProcesando:", nombre_contraste, "\n")
+  
+  signif_data <- read.xlsx(archivo_excel)
+  if (!"Protein" %in% colnames(signif_data)) {
+    stop("No se encuentra la columna 'Protein' en el archivo:", archivo_excel)
+  }
+  
+  signif_symbols <- gsub(".*GN=([^ ]+).*", "\\1", signif_data$Protein)
+  
+  # Analizar las tres ontologías y combinar
+  ontologias <- c("BP", "CC", "MF")
+  results_list <- lapply(ontologias, function(ont) {
+    run_topGO(signif_symbols, ont, nombre_contraste)
+  })
+  
+  full_table <- do.call(rbind, results_list)
+  full_table <- full_table[!duplicated(full_table$Term), ]
+  full_table$Term <- factor(full_table$Term, levels = rev(full_table$Term))
+  
+  # Etiquetas y colores
+  full_table$Ontology <- recode(full_table$Ontology,
+                                "BP" = "Biological process",
+                                "CC" = "Cellular component",
+                                "MF" = "Molecular function")
+  
+  colores <- c("Biological process" = "firebrick", 
+               "Cellular component" = "dodgerblue3", 
+               "Molecular function" = "forestgreen")
+  
+  # Barplot con etiquetas
+  p <- ggplot(full_table, aes(x = Term, y = negLogP, fill = Ontology)) +
+    geom_col(width = 0.6) +
+    geom_text(aes(label = round(negLogP, 2)),
+              hjust = -0.1, size = 3.2, color = "black") +
+    coord_flip() +
+    labs(title = paste("GO functional analysis:", nombre_contraste),
+         x = NULL,
+         y = expression(-log[10](p~value)),
+         fill = NULL) +
+    scale_fill_manual(values = colores) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    theme_minimal(base_size = 12) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text.y = element_text(size = 9),
+      axis.text.x = element_text(size = 10),
+      axis.title.x = element_text(face = "bold"),
+      legend.position = "right",
+      plot.margin = margin(10, 20, 10, 10)
+    )
+  
+  # Guardar
+  write.csv(full_table, paste0("GO_combined_table_", nombre_contraste, ".csv"), row.names = FALSE)
+  ggsave(paste0("GO_combined_barplot_", nombre_contraste, ".pdf"), plot = p, width = 10, height = 7)
+  cat("Gráfico y tabla guardados para", nombre_contraste, "\n")
+}
+
+# 4. Comparaciones y archivos
+comparaciones <- list(
+  CN_vs_Others = "proteinas_significativas_CN_vs_Others.xlsx",
+  CT_vs_Cancer = "proteinas_significativas_CT_vs_Cancer.xlsx",
+  M0_vs_M1     = "proteinas_significativas_M0_vs_M1.xlsx",
+  CT_vs_M0     = "proteinas_significativas_CT_vs_M0.xlsx",
+  CT_vs_M1     = "proteinas_significativas_CT_vs_M1.xlsx"
+)
+
+# 5. Ejecutar análisis GO por comparación
+for (nombre in names(comparaciones)) {
+  archivo <- comparaciones[[nombre]]
+  if (file.exists(archivo)) {
+    run_topGO_combined_plot(archivo, nombre)
+  } else {
+    cat("Archivo no encontrado:", archivo, "\n")
+  }
+}
+
+# 6. Proteínas candidatas de M1 (no sólo sobreexpresadas)
+get_ids <- function(df) gsub(".*GN=([^ ]+).*", "\\1", df$Protein)
+
+# Leer comparaciones necesarias
+ct_m1 <- read.xlsx("proteinas_significativas_CT_vs_M1.xlsx")
+ct_m0 <- read.xlsx("proteinas_significativas_CT_vs_M0.xlsx")
+m0_m1 <- read.xlsx("proteinas_significativas_M0_vs_M1.xlsx")
+
+# Obtener todos los genes significativos en M1 vs M0 (sin filtrar por dirección)
+m1_diff_vs_m0 <- m0_m1 %>% filter(pvalue < 0.05)
+ids_m1_diff_vs_m0 <- get_ids(m1_diff_vs_m0)
+
+# Excluir si aparecen en CT_vs_M0, incluir solo si están en CT_vs_M1
+ids_ct_m0 <- get_ids(ct_m0)
+ids_ct_m1 <- get_ids(ct_m1)
+
+exclusive_final_m1 <- setdiff(ids_m1_diff_vs_m0, ids_ct_m0)
+exclusive_final_m1 <- intersect(exclusive_final_m1, ids_ct_m1)
+
+# Guardar y analizar si hay resultados
+if (length(exclusive_final_m1) > 0) {
+  df_m1 <- data.frame(GeneSymbol = exclusive_final_m1)
+  write.xlsx(df_m1, "proteinas_candidatas_M1.xlsx", rowNames = FALSE)
+  cat("Proteínas candidatas exclusivas de M1 guardadas en 'proteinas_candidatas_M1.xlsx'. Total:", length(exclusive_final_m1), "\n")
+  
+  df_m1_topgo <- data.frame(Protein = paste0("GN=", exclusive_final_m1))
+  write.xlsx(df_m1_topgo, "proteinas_M1_altamente_expresadas_filtradas.xlsx", rowNames = FALSE)
+  run_topGO_combined_plot("proteinas_M1_altamente_expresadas_filtradas.xlsx", "M1_specific_filtered")
+} else {
+  cat("⚠️ No se encontraron proteínas que cumplan los criterios definidos para M1.\n")
+}
+
+# ============================================
+# 10. REACTOME
+# ============================================
+
+# Leer archivo descargado de Reactome
+
+setwd("C:/Users/lucia/OneDrive/Escritorio/MÁSTER BIOINFORMÁTICA VIU/TFM/REACTOME")
+data <- read.csv("result_intra.csv")
+
+# Instalar si no tienes ggplot2
+
+library(ggplot2)
+
+# Agregar columna -log10(p-valor)
+data$log10_pval <- -log10(data$Entities.pValue)
+
+# Crear dotplot
+p <- ggplot(data[1:20, ], aes(x = log10_pval, y = reorder(Pathway.name, log10_pval), size = X.Entities.found)) +
+  geom_point(alpha = 0.7) +
+  labs(
+    title = "Reactome Pathway Enrichment",
+    x = "-log10(p-value)",
+    y = "Pathway",
+    size = "Genes encontrados"
+  ) +
+  theme_minimal()
+
+colnames(data)
+
+ggsave("dotplot_reactome_intracelular.png", plot = p, width = 10, height = 6, dpi = 300)
