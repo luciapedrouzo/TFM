@@ -356,7 +356,6 @@ if (length(exclusive_final_m1) > 0) {
 # ============================================
 # 10. REACTOME
 # ============================================
-
 library(ggplot2)
 library(stringr)
 library(dplyr)
@@ -365,7 +364,7 @@ library(dplyr)
 setwd("C:/Users/lucia/OneDrive/Escritorio/MÁSTER BIOINFORMÁTICA VIU/TFM/REACTOME")
 
 # Leer archivo
-data <- read.csv("result_intra.csv", stringsAsFactors = FALSE)
+data <- read.csv("result_M1_intra.csv", stringsAsFactors = FALSE)
 
 # Filtrar rutas con nombre válido
 data <- data[!is.na(data$Pathway.name) & data$Pathway.name != "", ]
@@ -389,10 +388,10 @@ p <- ggplot(top_data, aes(x = log10_pval, y = reorder(Pathway.name, log10_pval),
   scale_color_gradient(low = "#56B1F7", high = "#132B43") +
   scale_size_continuous(range = c(3, 10)) +
   labs(
-    title = "Reactome Pathway Enrichment (Intracelular)",
+    title = "Reactome Pathway Enrichment (Intracelular M1 proteins)",
     x = expression(-log[10](p~value)),
-    y = "Ruta metabólica",
-    size = "Genes encontrados",
+    y = "Pathway",
+    size = "Genes",
     color = expression(-log[10](p~value))
   ) +
   theme_minimal(base_size = 14) +
