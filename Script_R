@@ -350,36 +350,60 @@ if (length(exclusive_final_m1) > 0) {
   write.xlsx(df_m1_topgo, "proteinas_M1_altamente_expresadas_filtradas.xlsx", rowNames = FALSE)
   run_topGO_combined_plot("proteinas_M1_altamente_expresadas_filtradas.xlsx", "M1_specific_filtered")
 } else {
-  cat("⚠️ No se encontraron proteínas que cumplan los criterios definidos para M1.\n")
+  cat("No se encontraron proteínas que cumplan los criterios definidos para M1.\n")
 }
 
 # ============================================
 # 10. REACTOME
 # ============================================
 
-# Leer archivo descargado de Reactome
-
-setwd("C:/Users/lucia/OneDrive/Escritorio/MÁSTER BIOINFORMÁTICA VIU/TFM/REACTOME")
-data <- read.csv("result_intra.csv")
-
-# Instalar si no tienes ggplot2
-
 library(ggplot2)
+library(stringr)
+library(dplyr)
 
-# Agregar columna -log10(p-valor)
+# Establecer directorio
+setwd("C:/Users/lucia/OneDrive/Escritorio/MÁSTER BIOINFORMÁTICA VIU/TFM/REACTOME")
+
+# Leer archivo
+data <- read.csv("result_intra.csv", stringsAsFactors = FALSE)
+
+# Filtrar rutas con nombre válido
+data <- data[!is.na(data$Pathway.name) & data$Pathway.name != "", ]
+
+# Verificar que p-value y genes encontrados no sean NA
+data <- data[!is.na(data$Entities.pValue) & !is.na(data$X.Entities.found), ]
+
+# Calcular -log10(p-value)
 data$log10_pval <- -log10(data$Entities.pValue)
 
-# Crear dotplot
-p <- ggplot(data[1:20, ], aes(x = log10_pval, y = reorder(Pathway.name, log10_pval), size = X.Entities.found)) +
-  geom_point(alpha = 0.7) +
+# Seleccionar top 20 rutas significativas
+top_data <- data %>% arrange(Entities.pValue) %>% slice(1:20)
+
+# Ajustar nombres largos con saltos de línea
+top_data$Pathway.name <- str_wrap(top_data$Pathway.name, width = 35)
+
+# Crear gráfico
+p <- ggplot(top_data, aes(x = log10_pval, y = reorder(Pathway.name, log10_pval),
+                          size = X.Entities.found, color = log10_pval)) +
+  geom_point(alpha = 0.8) +
+  scale_color_gradient(low = "#56B1F7", high = "#132B43") +
+  scale_size_continuous(range = c(3, 10)) +
   labs(
-    title = "Reactome Pathway Enrichment",
-    x = "-log10(p-value)",
-    y = "Pathway",
-    size = "Genes encontrados"
+    title = "Reactome Pathway Enrichment (Intracelular)",
+    x = expression(-log[10](p~value)),
+    y = "Ruta metabólica",
+    size = "Genes encontrados",
+    color = expression(-log[10](p~value))
   ) +
-  theme_minimal()
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    axis.text.y = element_text(size = 10),
+    axis.title = element_text(size = 14),
+    legend.title = element_text(size = 13),
+    legend.text = element_text(size = 11)
+  )
 
-colnames(data)
-
-ggsave("dotplot_reactome_intracelular.png", plot = p, width = 10, height = 6, dpi = 300)
+# Guardar gráfico en PNG y PDF
+ggsave("dotplot_reactome_intracelular.png", plot = p, width = 10, height = 10, dpi = 300)
+ggsave("dotplot_reactome_intracelular.pdf", plot = p, width = 10, height = 10)
